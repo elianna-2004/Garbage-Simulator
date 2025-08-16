@@ -1,0 +1,189 @@
+// Implementation of reference counting garbage collection, which counts the number of heap references present on the stacks 
+// and clears those with none
+
+use core::str;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::Path;
+use regex::Regex;
+//use recursive::recursive;
+
+use crate::types::{Memory, RefCountMem};
+use crate::utils::*;
+
+
+pub fn reference_counting(string_vec: Vec<String>) ->  RefCountMem {
+
+    // Initialize RefCountMem (see types for struct feilds)
+    let mut ref_counter = RefCountMem {stack: vec![], heap: vec![(None, 0); 10]};
+
+    // Define Regex
+    let pop = Regex::new(r"^Pop(\s)*$").unwrap();
+    let stack_call = Regex::new(r"^(Ref Stack )(([\s0-9])*)$").unwrap();
+    let heap_call = Regex::new(r"^(Ref Heap )([0-9])(([\s0-9])*)$").unwrap();
+
+    for line in &string_vec {
+        
+        // Match with regex 
+        if stack_call.is_match(&line) {
+
+            // Capture Numbers 
+            let caps = stack_call.captures(&line).unwrap();
+
+                // Check if empty stack call or not
+                if caps.get(2).is_some() {
+
+                    let group = caps.get(2).unwrap().as_str().chars();
+
+                    // Create Vector to push onto stack
+                    let mut stack_vec = Vec::new();
+
+                    // Process each number into vector 
+                    for char in group {
+                        
+                        if char.is_numeric() {
+                            // Convert char-int into int
+                            let int = int_of_string(char.to_string());
+
+                            // Add number to stack_vec
+                            stack_vec.push(int);
+
+                            // Create instance in heap & increase ref count
+                            if let Some(elem) = ref_counter.heap.get_mut(int as usize){
+    
+                                if elem.0.is_none() {
+                                    *elem = (Some(vec![]), elem.1 + 1);
+                                } else {
+                                    elem.1 = elem.1 + 1;
+                                }
+                            }
+                        }
+                    }
+
+                    // push stack_vec to stack
+                    ref_counter.stack.push(stack_vec);
+
+                } else {
+                    // If empty stack is called
+                    ref_counter.stack.push(vec![]); 
+                }
+
+        } 
+        
+        if heap_call.is_match(&line) {
+
+            // Capture Numbers 
+            let caps = heap_call.captures(&line).unwrap();
+            let ref_num_str = caps.get(2).unwrap().as_str();
+            let int_ref_num = int_of_string(ref_num_str.to_owned());
+
+            // Get the Reference Count this memory currently has in the heap
+            let mut times_ref = 0;
+
+            if let Some(elem) = ref_counter.heap.get(int_ref_num as usize) {
+                times_ref = elem.1;
+            }
+
+            // Ensure there are numbers to be referenced 
+            if caps.get(3).is_some()  {
+
+                // Gets numbers to be added to ref_num references
+                let group = caps.get(3).unwrap().as_str().chars();
+                let mut heap_vec = Vec::new();
+
+                for char in group {
+
+                    if char.is_numeric() {
+                        
+                        // Push it to heap vec
+                        let int = int_of_string(char.to_string());
+                        heap_vec.push(int);
+
+                        // Add reference to heap for each num that ref_num references
+                        if let Some(elem) = ref_counter.heap.get_mut(int as usize){
+
+                            if times_ref != 0 {
+                                if elem.0.is_none() {
+                                    *elem = (Some(vec![]), 1);
+                                } else {
+                                    elem.1 = elem.1 + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Gives ownership to vector of references 
+                if let Some(elem) = ref_counter.heap.get_mut(int_ref_num as usize){
+                    *elem = (Some(heap_vec), elem.1);
+                }
+            } else {
+                // Allocate memory that references nothing can "ignore"
+                // References Memory that has not been allocated
+                continue;
+            }
+        }
+
+        if pop.is_match(&line){
+
+            if !ref_counter.stack.is_empty() {
+
+                // Get vector of popped
+                let popped = ref_counter.stack.pop().unwrap();
+
+                // Use Breadth-First Traversal
+                // Create Vector to simulate Queue
+                let mut refs = vec![];
+
+                // Pushes each int that is popped
+                for int in &popped {
+                    // Gets starting [s]
+                    refs.push(int.to_owned());
+                }
+                
+                while !refs.is_empty() {
+
+                    // Need to "dequeue" elts from the from
+                    let num: u32 = refs.get(0).unwrap().clone();
+                    refs.remove(0);
+                    
+
+                    if let Some(elem) = ref_counter.heap.get_mut(num.to_owned() as usize){
+
+                        if elem.1 - 1 == 0 {
+
+                            // Add all adjacent references if this one will be deleted
+                            for adj in elem.0.clone().unwrap() {
+
+                                // Simulates queue by adding new elts to the end
+                                refs.insert(refs.len(),adj);
+                            }
+
+                            // Set the current element to None and 0 references
+                            *elem = (None, 0)
+
+                        } else {
+                            // Otherwise we can juts decrement the references
+                            elem.1 = elem.1 - 1;
+                        }
+                    }
+                } 
+            }     
+        }
+    }
+
+    // Final sweep
+    let mut ind = 0;
+
+    while ind < 10 {
+        if let Some(elem) = ref_counter.heap.get_mut(ind as usize){
+            if elem.1 == 0 {
+                *elem = (None, 0);
+            }
+        }
+        ind += 1; 
+    }
+
+    ref_counter
+}
