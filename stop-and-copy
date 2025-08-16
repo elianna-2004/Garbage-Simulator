@@ -1,0 +1,547 @@
+// Implementation of stop and copy garbage collection, which consists of a heap with a "dead" and "alive" side
+// Copies heap and removes what is no longer reachable to the alive side 
+
+use core::str;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::Path;
+use regex::Regex;
+
+use crate::types::{Memory, RefCountMem};
+use crate::utils::*;
+
+pub fn reference_counting(string_vec: Vec<String>) ->  RefCountMem {
+
+    // Initialize RefCountMem (see types for struct feilds)
+    let mut ref_counter = RefCountMem {stack: vec![], heap: vec![(None, 0); 10]};
+
+    // Define Regex
+    let pop = Regex::new(r"^Pop(\s)*$").unwrap();
+    let stack_call = Regex::new(r"^(Ref Stack )(([\s0-9])*)$").unwrap();
+    let heap_call = Regex::new(r"^(Ref Heap )([0-9])(([\s0-9])*)$").unwrap();
+
+    for line in &string_vec {
+        
+        // Match with regex 
+        if stack_call.is_match(&line) {
+
+            // Capture Numbers 
+            let caps = stack_call.captures(&line).unwrap();
+
+                // Check if empty stack call or not
+                if caps.get(2).is_some() {
+
+                    let group = caps.get(2).unwrap().as_str().chars();
+
+                    // Create Vector to push onto stack
+                    let mut stack_vec = Vec::new();
+
+                    // Process each number into vector 
+                    for char in group {
+                        
+                        if char.is_numeric() {
+                            // Convert char-int into int
+                            let int = int_of_string(char.to_string());
+
+                            // Add number to stack_vec
+                            stack_vec.push(int);
+
+                            // Create instance in heap & increase ref count
+                            if let Some(elem) = ref_counter.heap.get_mut(int as usize){
+    
+                                if elem.0.is_none() {
+                                    *elem = (Some(vec![]), elem.1 + 1);
+                                } else {
+                                    elem.1 = elem.1 + 1;
+                                }
+                            }
+                        }
+                    }
+
+                    // push stack_vec to stack
+                    ref_counter.stack.push(stack_vec);
+
+                } else {
+                    // If empty stack is called
+                    ref_counter.stack.push(vec![]); 
+                }
+
+        } 
+        
+        if heap_call.is_match(&line) {
+
+            // Capture Numbers 
+            let caps = heap_call.captures(&line).unwrap();
+            let ref_num_str = caps.get(2).unwrap().as_str();
+            let int_ref_num = int_of_string(ref_num_str.to_owned());
+
+            // Get the Reference Count this memory currently has in the heap
+            let mut times_ref = 0;
+
+            if let Some(elem) = ref_counter.heap.get(int_ref_num as usize) {
+                times_ref = elem.1;
+            }
+
+            // Ensure there are numbers to be referenced 
+            if caps.get(3).is_some()  {
+
+                // Gets numbers to be added to ref_num references
+                let group = caps.get(3).unwrap().as_str().chars();
+                let mut heap_vec = Vec::new();
+
+                for char in group {
+
+                    if char.is_numeric() {
+                        
+                        // Push it to heap vec
+                        let int = int_of_string(char.to_string());
+                        heap_vec.push(int);
+
+                        // Add reference to heap for each num that ref_num references
+                        if let Some(elem) = ref_counter.heap.get_mut(int as usize){
+
+                            if times_ref != 0 {
+                                if elem.0.is_none() {
+                                    *elem = (Some(vec![]), 1);
+                                } else {
+                                    elem.1 = elem.1 + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Gives ownership to vector of references 
+                if let Some(elem) = ref_counter.heap.get_mut(int_ref_num as usize){
+                    *elem = (Some(heap_vec), elem.1);
+                }
+            } else {
+                // Allocate memory that references nothing can "ignore"
+                // References Memory that has not been allocated
+                continue;
+            }
+        }
+
+        if pop.is_match(&line){
+
+            if !ref_counter.stack.is_empty() {
+
+                // Get vector of popped
+                let popped = ref_counter.stack.pop().unwrap();
+
+                // Use Breadth-First Traversal
+                // Create Vector to simulate Queue
+                let mut refs = vec![];
+
+                // Pushes each int that is popped
+                for int in &popped {
+                    // Gets starting [s]
+                    refs.push(int.to_owned());
+                }
+                
+                while !refs.is_empty() {
+
+                    // Need to "dequeue" elts from the from
+                    let num: u32 = refs.get(0).unwrap().clone();
+                    refs.remove(0);
+                    
+
+                    if let Some(elem) = ref_counter.heap.get_mut(num.to_owned() as usize){
+
+                        if elem.1 - 1 == 0 {
+
+                            // Add all adjacent references if this one will be deleted
+                            for adj in elem.0.clone().unwrap() {
+
+                                // Simulates queue by adding new elts to the end
+                                refs.insert(refs.len(),adj);
+                            }
+
+                            // Set the current element to None and 0 references
+                            *elem = (None, 0)
+
+                        } else {
+                            // Otherwise we can juts decrement the references
+                            elem.1 = elem.1 - 1;
+                        }
+                    }
+                } 
+            }     
+        }
+    }
+
+    // Final sweep
+    let mut ind = 0;
+
+    while ind < 10 {
+        if let Some(elem) = ref_counter.heap.get_mut(ind as usize){
+            if elem.1 == 0 {
+                *elem = (None, 0);
+            }
+        }
+        ind += 1; 
+    }
+
+    ref_counter
+}
+
+// suggested helper function. You may modify parameters as you wish.
+// Takes in some form of stack and heap and returns all indicies in heap
+// that can be reached.
+pub fn reachable(stack: &Vec<Vec<u32>>, heap: &Vec<Option<(String, Vec<u32>)>>) -> Vec<u32> {
+    
+    // Breadth-First Traversal of Reachable Memory
+
+    // Define "queue" and Traveresal 
+    let mut traverse = Vec::new();
+    let mut reach= Vec::new();
+
+    // Get [s] = elements on stack
+    for vec in stack {
+        for int in vec {
+
+            // Get all elements of stack (Vector of Vectors)
+            traverse.push(int.to_owned());
+
+            // If on stack = reacheable so we add to our reach
+            // Follow queue-fashion and insert to the end
+            reach.push(int.to_owned());
+        }
+    }
+
+    while !traverse.is_empty() {
+
+        // Dequeue after obtaining value
+        let int = traverse.get(0).unwrap().clone();
+        traverse.remove(0);
+
+        if let Some(elem) = heap.get(int as usize).unwrap(){
+            // For ever adjacent elt that can be reached we add to reach
+            for adj in &elem.1 {
+
+                // Add to continue traversal path
+                if !traverse.contains(&adj) && !reach.contains(&adj) {
+                    traverse.insert(traverse.len(), adj.to_owned());
+                }
+
+                // Prevents adding duplicates
+                if !reach.contains(&adj) {
+                    reach.insert(reach.len(), adj.to_owned());
+                }
+            }
+        }
+    }
+
+    reach
+} 
+
+pub fn mark_and_sweep(mem: &mut Memory) -> () {
+    let mut ind = 0;
+    let reach = reachable(&mem.stack, &mem.heap);
+
+    for elt in &mut mem.heap {
+        if !reach.contains(&ind) {
+            *elt = None;
+        }
+
+        ind += 1;
+    }
+}
+
+// alive says which half is CURRENTLY alive. You must copy to the other half.
+// 0 for left side currently in use, 1 for right side currently in use
+pub fn stop_and_copy(mem: &mut Memory, alive: u32) -> () {
+    // Split data in half based on flag
+    let half = (mem.heap.len() / 2) as u32;
+    let length = (mem.heap.len()) as u32;
+
+    // Will return a list of reach to alive stack with initial indicies 
+    let reach = reachable (&mem.stack, &mem.heap);
+
+    // If flag is 0 then left = alive & right = dead
+    if alive == 0 {
+        let mut positions = HashMap::new();
+        let mut index = 0;
+
+        // Get all intial positions, store as a (Key, Value) so we can look up the key
+        while index < half {
+            if let Some (elem) = mem.heap.get(index as usize) {
+                if elem.is_some() {
+                    // Key
+                    let str = elem.clone().unwrap().0;
+                    // Value
+                    let pos = index;
+
+                    // Key and Value Pair 
+                    positions.insert(str, pos);
+                }
+            }
+            index += 1;
+        }
+
+        // First Copy Alive side to Dead Side
+        let mut ind: u32 = 0;
+        
+        while ind < half {
+            // COPY INDEX FROM FRONT TO MIDDLE
+            let mut replace = mem.heap.get(ind as usize).unwrap().clone();
+
+            if let Some (elem)  = mem.heap.get_mut((half + ind) as usize) {
+
+                // Determine if replacement is reachable 
+                if !reach.contains(&ind){
+                    replace = None;
+                }
+
+                // OVERWRITE IND FROM MIDDLE TO END
+                *elem = replace;
+            }            
+            // Increase index
+            ind += 1;
+        }
+
+        // Get in Proper Order
+        let mut ord_ind = half;
+        let mut tracker = half;
+
+        while tracker < length  as u32 {
+
+            if let Some(elem) = mem.heap.get_mut(ord_ind as usize){
+
+                if *elem == None {
+                    let mut current_ind = ord_ind;
+                    let mut next_ind = ord_ind + 1;
+
+                    while next_ind != length {
+
+                        mem.heap.swap(current_ind as usize, next_ind as usize);
+
+                        current_ind += 1;
+                        next_ind += 1;
+                    }
+
+                } else {
+
+                    ord_ind += 1;
+                }
+            }
+            tracker += 1;
+        }
+
+        // Update Stack & Heap References
+        let mut begin = half;
+        let mut updated_positions = HashMap::new();
+
+        // Update (Key, Value) Pairs
+        while begin < length {
+            if let Some (elem) = mem.heap.get(begin as usize) {
+                    if elem.is_some() {
+                        // Get Key 
+                        let str = elem.clone().unwrap().0;
+                        let pos = begin;
+
+                        // Update position
+                        updated_positions.insert(str, pos);
+                    } 
+            }
+            begin += 1;
+        }
+
+        // Update All Heap References 
+        let mut start = half;
+
+        while start < length {
+            if let Some (elem) = mem.heap.get_mut(start as usize) {
+                if elem.is_some() {
+                        let mut refs = vec![];
+                        let this = elem.clone().unwrap().0.to_string();
+                        let mut new_pos = 0;
+
+                        for int in elem.clone().unwrap().1 {
+                            for val in &positions {
+                                if int == *val.1 {
+                                    for val2 in &updated_positions {
+                                        if val2.0 == val.0{
+                                            new_pos = *val2.1;
+                                        }
+                                    }
+                                    refs.push(new_pos.clone());
+                                }
+                            }
+                        }
+                        *elem =  Some((this, refs));
+                    }
+                }
+               start += 1; 
+            }
+
+            // Update Stack References
+            let mut trav = 0;
+
+            while trav < mem.stack.len() { 
+
+                if let Some(vec) = mem.stack.get_mut(trav as usize) {
+                    let mut updated_vec = vec![];
+
+                    for int in vec.clone() {
+                        for val in &positions {
+                            if int == val.1.clone() {
+                                for val2 in &updated_positions {
+                                    if val2.0 == val.0 {
+                                        updated_vec.push(val2.1.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    *vec = updated_vec; 
+                }
+                trav += 1;
+            } 
+    }
+
+    // If flag is 1 then left = dead & right = alive
+    if alive == 1 {
+        let mut positions = HashMap::new();
+        let mut index = half;
+
+        // Get all intial positions, store as a (Key, Value) so we can look up the key
+        while index < length {
+            if let Some (elem) = mem.heap.get(index as usize) {
+                if elem.is_some() {
+                    // Key
+                    let str = elem.clone().unwrap().0;
+                    // Value
+                    let pos = index;
+
+                    // Key and Value Pair 
+                    positions.insert(str, pos);
+                }
+            }
+            index += 1;
+        }
+
+
+        // First Copy Alive side to Dead Side
+        let mut ind: u32 = half;
+        
+        while ind < length {
+            // COPY INDEX FROM MIDDLE TO END
+            let mut replace = mem.heap.get(ind as usize).unwrap().clone();
+
+            if let Some (elem)  = mem.heap.get_mut((ind - half) as usize) {
+
+                // Determine if replacement is reachable 
+                if !reach.contains(&ind){
+                    replace = None;
+                }
+
+                // OVERWRITE IND FROM MIDDLE TO END 
+                *elem = replace;
+            }            
+            // Increase index
+            ind += 1;
+        }
+
+        // Get in Proper Order
+        let mut ord_ind = 0;
+        let mut tracker = 0;
+
+        while tracker < half as u32 {
+
+            if let Some(elem) = mem.heap.get_mut(ord_ind as usize) {
+
+                if *elem == None {
+                    let mut current_ind = ord_ind;
+                    let mut next_ind = ord_ind + 1;
+
+                    while next_ind != half {
+
+                        mem.heap.swap(current_ind as usize, next_ind as usize);
+
+                        current_ind += 1;
+                        next_ind += 1;
+                    }
+
+                } else {
+
+                    ord_ind += 1;
+                }
+            }
+            tracker += 1;
+        }
+
+        // Update Heap References (alive side is now left)
+        let mut begin = 0;
+        let mut updated_positions = HashMap::new();
+
+        // Update (Key, Value) Pairs
+        while begin < half {
+            if let Some (elem) = mem.heap.get(begin as usize) {
+                    if elem.is_some() {
+                        // Get Key 
+                        let str = elem.clone().unwrap().0;
+                        let pos = begin;
+
+                        // Update position
+                        updated_positions.insert(str, pos);
+                    } 
+            }
+            begin += 1;
+        }
+        
+        // Update All Heap References 
+        let mut start = 0;
+
+        while start < half {
+            if let Some (elem) = mem.heap.get_mut(start as usize) {
+                if elem.is_some() {
+                        let mut refs = vec![];
+                        let this = elem.clone().unwrap().0.to_string();
+                        let mut new_pos = 0;
+
+                        for int in elem.clone().unwrap().1 {
+                            for val in &positions {
+                                if int == *val.1 {
+                                    for val2 in &updated_positions {
+                                        if val2.0 == val.0{
+                                            new_pos = *val2.1;
+                                        }
+                                    }
+                                    refs.push(new_pos.clone());
+                                }
+                            }
+                        }
+                        *elem =  Some((this, refs));
+                    }
+                }
+               start += 1; 
+            }
+
+            // Update Stack References
+            let mut trav = 0;
+
+            while trav < mem.stack.len() { 
+
+                if let Some(vec) = mem.stack.get_mut(trav as usize) {
+                    let mut updated_vec = vec![];
+
+                    for int in vec.clone() {
+                        for val in &positions {
+                            if int == val.1.clone() {
+                                for val2 in &updated_positions {
+                                    if val2.0 == val.0 {
+                                        updated_vec.push(val2.1.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    *vec = updated_vec; 
+                }
+                trav += 1;
+            }
+        }
+    
+    }
